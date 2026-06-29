@@ -6,6 +6,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Iterator
 
 from src.config import DB_PATH, RAW_DIR
@@ -35,6 +36,17 @@ CREATE TABLE IF NOT EXISTS documents (
 
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source);
 CREATE INDEX IF NOT EXISTS idx_documents_fetched_at ON documents(fetched_at);
+
+CREATE TABLE IF NOT EXISTS chunks (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    char_count INTEGER NOT NULL,
+    indexed_at TEXT NOT NULL,
+    FOREIGN KEY (document_id) REFERENCES documents(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
 """
 
 
@@ -125,10 +137,56 @@ def log_ingestion_run(
         )
 
 
-def get_corpus_stats() -> dict:
-    """Return summary statistics for the dashboard and CLI."""
+def iter_unprocessed_documents(include_all: bool = False) -> Iterator[Document]:
+    """Yield Documents that have not yet been chunked and indexed.
+
+    Args:
+        include_all: If True, yield every document regardless of indexing state.
+    """
     with get_connection() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        if include_all:
+            rows = conn.execute("SELECT file_path FROM documents").fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT d.file_path FROM documents d
+                LEFT JOIN chunks c ON c.document_id = d.id
+                WHERE c.id IS NULL
+                """
+            ).fetchall()
+
+    for row in rows:
+        file_path = Path(row["file_path"])
+        if not file_path.exists():
+            continue
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+        yield Document.from_dict(data)
+
+
+def mark_chunks_indexed(rows: list[tuple]) -> None:
+    """Record indexed chunks in SQLite.
+
+    Args:
+        rows: List of (chunk_id, document_id, chunk_index, char_count,
+            indexed_at_iso) tuples.
+    """
+    if not rows:
+        return
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO chunks
+            (id, document_id, chunk_index, char_count, indexed_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+
+def get_corpus_stats() -> dict:
+    """Return corpus and index summary statistics."""
+    with get_connection() as conn:
+        total_docs = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         per_source = {
             row["source"]: row["count"]
             for row in conn.execute(
@@ -138,9 +196,16 @@ def get_corpus_stats() -> dict:
         last_run = conn.execute(
             "SELECT MAX(run_finished_at) AS last FROM ingestion_log"
         ).fetchone()["last"]
+        total_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        indexed_docs = conn.execute(
+            "SELECT COUNT(DISTINCT document_id) FROM chunks"
+        ).fetchone()[0]
+
     return {
-        "total_documents": total,
+        "total_documents": total_docs,
         "documents_per_source": per_source,
         "source_count": len(per_source),
         "last_ingestion_at": last_run,
+        "total_chunks": total_chunks,
+        "indexed_documents": indexed_docs,
     }

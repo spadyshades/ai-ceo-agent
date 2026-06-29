@@ -31,6 +31,26 @@ class Document:
         data["fetched_at"] = self.fetched_at.isoformat()
         return data
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Document":
+        """Reconstruct a Document from its dict representation."""
+        pub = data.get("published_at")
+        fetch = data.get("fetched_at")
+        return cls(
+            id=data["id"],
+            source=data["source"],
+            url=data["url"],
+            title=data["title"],
+            text=data["text"],
+            published_at=datetime.fromisoformat(pub) if pub else None,
+            fetched_at=(
+                datetime.fromisoformat(fetch)
+                if fetch
+                else datetime.now(timezone.utc)
+            ),
+            metadata=data.get("metadata", {}),
+        )
+
 
 def make_document_id(source: str, url: str) -> str:
     """Deterministic 16-character document ID derived from source and URL."""

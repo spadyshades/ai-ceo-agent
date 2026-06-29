@@ -1,17 +1,14 @@
-# ===== Core LLM =====
 ollama>=0.4.0
 
-# ===== Agent framework =====
 langgraph>=0.2.0
 langchain>=0.3.0
 langchain-community>=0.3.0
 langchain-ollama>=0.2.0
+langchain-text-splitters>=0.3.0
 pydantic>=2.6.0
 
-# ===== Vector store =====
 chromadb>=0.5.0
 
-# ===== Embeddings & NLP =====
 sentence-transformers>=3.0.0
 transformers>=4.40.0
 torch>=2.1.0
@@ -19,11 +16,9 @@ spacy>=3.7.0
 nltk>=3.8.0
 datasketch>=1.6.0
 
-# ===== Dashboard =====
 streamlit>=1.30.0
 plotly>=5.18.0
 
-# ===== Data collection =====
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 feedparser>=6.0.0
@@ -31,11 +26,9 @@ lxml>=5.0.0
 yfinance>=0.2.40
 arxiv>=2.1.0
 
-# ===== Data handling =====
 pandas>=2.0.0
 sqlalchemy>=2.0.0
 
-# ===== Utilities =====
 python-dotenv>=1.0.0
 schedule>=1.2.0
 tqdm>=4.66.0
