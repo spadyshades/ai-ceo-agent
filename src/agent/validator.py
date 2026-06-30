@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import numpy as np
+
 from src.agent.schema import AgentState, ValidationResult
 from src.config import (
     MAX_REPLAN_ATTEMPTS,
@@ -40,7 +42,6 @@ JSON:"""
 
 
 def _check_rules(state: AgentState) -> list[str]:
-    """Phase 4 rule checks."""
     issues: list[str] = []
     if not state.recommendations:
         issues.append("No recommendations were produced")
@@ -71,7 +72,6 @@ def _check_rules(state: AgentState) -> list[str]:
 
 
 def _check_source_existence(state: AgentState) -> list[str]:
-    """Verify that cited chunk IDs actually exist in the Chroma collection."""
     issues: list[str] = []
     if not state.recommendations:
         return issues
@@ -102,7 +102,6 @@ def _check_source_existence(state: AgentState) -> list[str]:
 
 
 def _check_claim_alignment(state: AgentState) -> list[str]:
-    """Check embedding similarity between recommendation claims and cited evidence."""
     issues: list[str] = []
     if not state.recommendations:
         return issues
@@ -113,26 +112,21 @@ def _check_claim_alignment(state: AgentState) -> list[str]:
             continue
         try:
             claim_text = f"{rec.title}. {rec.rationale}"
-            claim_emb = embed_texts([claim_text])[0]
+            claim_emb = np.array(embed_texts([claim_text])[0])
 
-            valid_ids = []
-            try:
-                result = collection.get(ids=rec.evidence_chunk_ids, include=["embeddings"])
-                valid_ids = result.get("ids", [])
-                embeddings = result.get("embeddings", [])
-            except Exception:
+            result = collection.get(
+                ids=rec.evidence_chunk_ids, include=["embeddings"]
+            )
+            valid_ids = result.get("ids", [])
+            embeddings = result.get("embeddings")
+
+            if not valid_ids or embeddings is None or len(embeddings) == 0:
                 continue
 
-            if not valid_ids or not embeddings:
-                continue
+            evidence_embs = np.array(embeddings)
+            similarities = np.dot(evidence_embs, claim_emb)
+            avg_sim = float(np.mean(similarities))
 
-            # Cosine similarity via dot product (embeddings are L2-normalised)
-            similarities = []
-            for emb in embeddings:
-                dot = sum(a * b for a, b in zip(claim_emb, emb))
-                similarities.append(dot)
-
-            avg_sim = sum(similarities) / len(similarities) if similarities else 0
             if avg_sim < 0.25:
                 issues.append(
                     f"rec#{i} '{rec.title[:30]}': weak alignment with cited "
@@ -145,7 +139,6 @@ def _check_claim_alignment(state: AgentState) -> list[str]:
 
 
 def _check_adversarial(state: AgentState) -> list[str]:
-    """LLM-based adversarial check using the comparator."""
     issues: list[str] = []
     if not state.recommendations:
         return issues
@@ -170,7 +163,8 @@ def _check_adversarial(state: AgentState) -> list[str]:
             )
             response = complete(prompt, temperature=0.1)
 
-            if '"defensible": false' in response.lower() or '"defensible":false' in response.lower():
+            resp_lower = response.lower().replace(" ", "")
+            if '"defensible":false' in resp_lower:
                 import json, re
                 match = re.search(r"\{.*\}", response, re.DOTALL)
                 concern = ""
@@ -197,11 +191,8 @@ def _check_adversarial(state: AgentState) -> list[str]:
 def validate_node(state: AgentState) -> dict[str, Any]:
     logger.info("Validator: checking %d recommendations", len(state.recommendations))
 
-    # Always run rule checks
     all_issues = _check_rules(state)
 
-    # Run advanced checks only on the final validation pass (skip on early replans
-    # to save LLM time; the rule checks alone drive replanning for evidence gaps)
     is_final_pass = state.replan_count >= MAX_REPLAN_ATTEMPTS - 1
 
     if not all_issues and is_final_pass:
