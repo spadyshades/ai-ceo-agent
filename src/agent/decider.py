@@ -39,13 +39,13 @@ Produce 3 to 5 strategic recommendations for the CEO. Each must be specific,
 actionable, and grounded in the evidence above.
 
 Each recommendation MUST include:
-- title (max 12 words)
-- rationale (2-3 sentences)
-- priority ("High", "Medium", or "Low")
-- expected_impact (one sentence)
-- risk_assessment (one sentence)
-- confidence (number 0.0 to 1.0)
-- evidence_chunk_ids: list of at least 3 chunk IDs from above, from at least 2 different sources
+- "title" (max 12 words)
+- "rationale" (2-3 sentences)
+- "priority": "High", "Medium", or "Low"
+- "expected_impact" (one sentence)
+- "risk_assessment" (one sentence)
+- "confidence" (number 0.0 to 1.0)
+- "evidence_chunk_ids": list of at least 3 chunk IDs from the retrieved evidence above
 
 Return ONLY a JSON array of recommendation objects. No commentary.
 
@@ -78,55 +78,83 @@ def _extract_json_array(text: str) -> list[dict] | None:
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if not match:
         return None
+    raw = match.group(0)
     try:
-        data = json.loads(match.group(0))
+        data = json.loads(raw)
+        return data if isinstance(data, list) else None
+    except json.JSONDecodeError:
+        pass
+    # Clean common LLM mistakes
+    cleaned = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', raw)
+    cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+    try:
+        data = json.loads(cleaned)
         return data if isinstance(data, list) else None
     except json.JSONDecodeError:
         return None
 
 
-def _build_recommendation(
-    raw: dict,
+def _build_source_map(state: AgentState) -> dict[str, str]:
+    """Build chunk_id -> source mapping from all available evidence."""
+    sources: dict[str, str] = {}
+    for ref in state.retrieved_chunks:
+        if ref.source:
+            sources[ref.chunk_id] = ref.source
+    for collection in (state.opportunities, state.risks, state.trends):
+        for item in collection:
+            for cid, src in zip(item.evidence_chunk_ids, item.evidence_sources):
+                if src:
+                    sources[cid] = src
+    return sources
+
+
+def _enrich_evidence(
+    rec: Recommendation,
     sources_by_chunk: dict[str, str],
-) -> Recommendation | None:
-    try:
-        evidence_ids = raw.get("evidence_chunk_ids") or []
-        if not isinstance(evidence_ids, list):
-            evidence_ids = []
-        evidence_ids = [str(c) for c in evidence_ids]
-        sources = sorted({
-            sources_by_chunk[cid]
-            for cid in evidence_ids
-            if cid in sources_by_chunk and sources_by_chunk[cid]
-        })
-        return Recommendation(
-            title=str(raw.get("title", "")).strip(),
-            rationale=str(raw.get("rationale", "")).strip(),
-            priority=str(raw.get("priority", "Medium")).strip().capitalize(),
-            expected_impact=str(raw.get("expected_impact", "")).strip(),
-            risk_assessment=str(raw.get("risk_assessment", "")).strip(),
-            confidence=float(raw.get("confidence", 0.5)),
-            evidence_chunk_ids=evidence_ids,
-            evidence_sources=sources,
-        )
-    except Exception as exc:
-        logger.warning("Recommendation parse error: %s", exc)
-        return None
+    state: AgentState,
+) -> Recommendation:
+    """Auto-attach sources for cited chunk IDs and supplement with retrieved chunks."""
+    # Resolve sources for chunk IDs the LLM cited
+    resolved_sources = sorted({
+        sources_by_chunk[cid]
+        for cid in rec.evidence_chunk_ids
+        if cid in sources_by_chunk and sources_by_chunk[cid]
+    })
+
+    # If still lacking distinct sources, supplement from retrieved chunks
+    if len(resolved_sources) < 2 and state.retrieved_chunks:
+        used_ids = set(rec.evidence_chunk_ids)
+        for ref in state.retrieved_chunks:
+            if ref.source and ref.source not in resolved_sources:
+                if ref.chunk_id not in used_ids:
+                    rec.evidence_chunk_ids.append(ref.chunk_id)
+                    used_ids.add(ref.chunk_id)
+                    resolved_sources.append(ref.source)
+                    resolved_sources = sorted(set(resolved_sources))
+            if len(resolved_sources) >= 3:
+                break
+
+    # If still lacking evidence count, add more from retrieved chunks
+    if len(rec.evidence_chunk_ids) < 3 and state.retrieved_chunks:
+        used_ids = set(rec.evidence_chunk_ids)
+        for ref in state.retrieved_chunks:
+            if ref.chunk_id not in used_ids:
+                rec.evidence_chunk_ids.append(ref.chunk_id)
+                used_ids.add(ref.chunk_id)
+                if ref.source and ref.source not in resolved_sources:
+                    resolved_sources.append(ref.source)
+                    resolved_sources = sorted(set(resolved_sources))
+            if len(rec.evidence_chunk_ids) >= 5:
+                break
+
+    rec.evidence_sources = sorted(set(resolved_sources))
+    return rec
 
 
 def decide_node(state: AgentState) -> dict[str, Any]:
     logger.info("Decider: synthesising recommendations")
 
-    # Source lookup spans intelligence items AND retrieved chunks
-    sources_by_chunk: dict[str, str] = {}
-    for ref in state.retrieved_chunks:
-        if ref.source:
-            sources_by_chunk[ref.chunk_id] = ref.source
-    for collection in (state.opportunities, state.risks, state.trends):
-        for item in collection:
-            for cid, src in zip(item.evidence_chunk_ids, item.evidence_sources):
-                if src:
-                    sources_by_chunk[cid] = src
+    sources_by_chunk = _build_source_map(state)
 
     analysis_summary = (
         state.analysis.summary if state.analysis else "(no analysis available)"
@@ -156,9 +184,25 @@ def decide_node(state: AgentState) -> dict[str, Any]:
     for raw in raw_items:
         if not isinstance(raw, dict):
             continue
-        rec = _build_recommendation(raw, sources_by_chunk)
-        if rec and rec.title:
-            recommendations.append(rec)
+        try:
+            evidence_ids = raw.get("evidence_chunk_ids") or []
+            if not isinstance(evidence_ids, list):
+                evidence_ids = []
+            rec = Recommendation(
+                title=str(raw.get("title", "")).strip(),
+                rationale=str(raw.get("rationale", "")).strip(),
+                priority=str(raw.get("priority", "Medium")).strip().capitalize(),
+                expected_impact=str(raw.get("expected_impact", "")).strip(),
+                risk_assessment=str(raw.get("risk_assessment", "")).strip(),
+                confidence=float(raw.get("confidence", 0.5)),
+                evidence_chunk_ids=[str(c) for c in evidence_ids],
+                evidence_sources=[],
+            )
+            rec = _enrich_evidence(rec, sources_by_chunk, state)
+            if rec.title:
+                recommendations.append(rec)
+        except Exception as exc:
+            logger.warning("Recommendation parse error: %s", exc)
 
     priority_order = {"High": 0, "Medium": 1, "Low": 2}
     recommendations.sort(
