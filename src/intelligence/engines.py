@@ -1,8 +1,4 @@
-"""Strategic intelligence engines: opportunities, risks, trends.
-
-These composite engines orchestrate the atomic tools and the LLM to
-produce structured analytical outputs the agent can use directly.
-"""
+"""Strategic intelligence engines: opportunities, risks, trends."""
 
 from __future__ import annotations
 
@@ -24,8 +20,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class StrategicItem:
-    """A single opportunity, risk, or trend with its evidence."""
-
     title: str
     description: str
     impact: str
@@ -60,7 +54,8 @@ _OPPORTUNITY_PROMPT = (
     '  "impact": one of "Low", "Medium", "High"\n'
     '  "confidence": a number from 0.0 to 1.0\n'
     '  "evidence_chunk_ids": list of chunk IDs from the excerpts that support it\n\n'
-    "Return a single valid JSON array with no surrounding text or commentary.\n\n"
+    "Return a single valid JSON array with double-quoted property names and no trailing commas. "
+    "No surrounding text or commentary.\n\n"
     "Excerpts:\n{excerpts}\n\n"
     "JSON array:"
 )
@@ -72,10 +67,11 @@ _RISK_PROMPT = (
     "For each risk, output an object with these fields:\n"
     '  "title": short headline (max 12 words)\n'
     '  "description": 2-3 sentences explaining the risk\n'
-    '  "impact": one of "Low", "Medium", "High" (severity)\n'
+    '  "impact": one of "Low", "Medium", "High"\n'
     '  "confidence": a number from 0.0 to 1.0\n'
     '  "evidence_chunk_ids": list of chunk IDs from the excerpts that support it\n\n'
-    "Return a single valid JSON array with no surrounding text or commentary.\n\n"
+    "Return a single valid JSON array with double-quoted property names and no trailing commas. "
+    "No surrounding text or commentary.\n\n"
     "Excerpts:\n{excerpts}\n\n"
     "JSON array:"
 )
@@ -91,7 +87,8 @@ _TREND_PROMPT = (
     '  "impact": one of "Low", "Medium", "High"\n'
     '  "confidence": a number from 0.0 to 1.0\n'
     '  "evidence_chunk_ids": list of chunk IDs from the excerpts that support it\n\n'
-    "Return a single valid JSON array with no surrounding text or commentary.\n\n"
+    "Return a single valid JSON array with double-quoted property names and no trailing commas. "
+    "No surrounding text or commentary.\n\n"
     "Rising entities:\n{rising}\n\n"
     "Excerpts:\n{excerpts}\n\n"
     "JSON array:"
@@ -99,7 +96,6 @@ _TREND_PROMPT = (
 
 
 def _gather_evidence(queries: list[str], per_query: int = 3) -> list[RetrievalHit]:
-    """Run each query and return unique hits across all of them."""
     seen: set[str] = set()
     unique: list[RetrievalHit] = []
     for query in queries:
@@ -121,21 +117,50 @@ def _format_excerpts(hits: list[RetrievalHit], max_hits: int = 15) -> str:
     return "\n\n".join(blocks)
 
 
+def _clean_json_string(s: str) -> str:
+    """Best-effort cleanup of common LLM JSON mistakes."""
+    # Quote unquoted property names: {key: ...} or , key: ...
+    s = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', s)
+    # Remove trailing commas before closing braces/brackets
+    s = re.sub(r",(\s*[}\]])", r"\1", s)
+    return s
+
+
 def _extract_json_array(text: str) -> list[dict[str, Any]]:
-    """Extract a JSON array from the LLM response, tolerating wrapping text."""
+    """Extract a JSON array with multiple fallback strategies."""
+    # 1. Direct parse of array region
     match = re.search(r"\[.*\]", text, re.DOTALL)
-    if not match:
-        logger.warning("No JSON array found in LLM response")
-        return []
-    try:
-        data = json.loads(match.group(0))
-        if isinstance(data, list):
-            return data
-        logger.warning("Parsed JSON is not a list")
-        return []
-    except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse LLM JSON: %s", exc)
-        return []
+    if match:
+        raw = match.group(0)
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return [d for d in data if isinstance(d, dict)]
+        except json.JSONDecodeError:
+            pass
+        try:
+            data = json.loads(_clean_json_string(raw))
+            if isinstance(data, list):
+                return [d for d in data if isinstance(d, dict)]
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Extract individual JSON objects
+    objects: list[dict[str, Any]] = []
+    for m in re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL):
+        chunk = m.group(0)
+        for candidate in (chunk, _clean_json_string(chunk)):
+            try:
+                obj = json.loads(candidate)
+                if isinstance(obj, dict):
+                    objects.append(obj)
+                    break
+            except json.JSONDecodeError:
+                continue
+
+    if not objects:
+        logger.warning("No JSON parseable in LLM response")
+    return objects
 
 
 def _to_strategic_items(
@@ -155,45 +180,39 @@ def _to_strategic_items(
             for cid in evidence_ids
             if cid in chunk_to_source
         })
-        items.append(
-            StrategicItem(
-                title=str(raw.get("title", "")).strip(),
-                description=str(raw.get("description", "")).strip(),
-                impact=str(raw.get("impact", "Medium")).strip().capitalize(),
-                confidence=float(raw.get("confidence", 0.5)),
-                evidence_chunk_ids=[str(cid) for cid in evidence_ids],
-                evidence_sources=sources,
+        try:
+            items.append(
+                StrategicItem(
+                    title=str(raw.get("title", "")).strip(),
+                    description=str(raw.get("description", "")).strip(),
+                    impact=str(raw.get("impact", "Medium")).strip().capitalize(),
+                    confidence=float(raw.get("confidence", 0.5)),
+                    evidence_chunk_ids=[str(cid) for cid in evidence_ids],
+                    evidence_sources=sources,
+                )
             )
-        )
+        except (ValueError, TypeError) as exc:
+            logger.warning("Skipping malformed item: %s", exc)
     return items
 
 
 def detect_opportunities() -> list[StrategicItem]:
-    """Identify strategic opportunities for BMW from the indexed corpus."""
     hits = _gather_evidence(_OPPORTUNITY_QUERIES)
     if not hits:
-        logger.info("No evidence retrieved for opportunities")
         return []
-    excerpts = _format_excerpts(hits)
     response = complete(
-        _OPPORTUNITY_PROMPT.format(excerpts=excerpts), temperature=0.3
+        _OPPORTUNITY_PROMPT.format(excerpts=_format_excerpts(hits)), temperature=0.3
     )
-    raw_items = _extract_json_array(response)
-    return _to_strategic_items(raw_items, hits)
+    return _to_strategic_items(_extract_json_array(response), hits)
 
 
 def detect_risks() -> list[StrategicItem]:
-    """Identify strategic risks facing BMW from the indexed corpus."""
     hits = _gather_evidence(_RISK_QUERIES)
     if not hits:
-        logger.info("No evidence retrieved for risks")
         return []
 
-    # Optional: prefer negative-sentiment chunks as risk evidence
     sentiments = classify_batch([hit.text[:1000] for hit in hits])
-    weighted = [
-        (hit, sent) for hit, sent in zip(hits, sentiments)
-    ]
+    weighted = list(zip(hits, sentiments))
     weighted.sort(
         key=lambda pair: (
             pair[1].label == "negative",
@@ -203,17 +222,15 @@ def detect_risks() -> list[StrategicItem]:
     )
     ordered_hits = [pair[0] for pair in weighted]
 
-    excerpts = _format_excerpts(ordered_hits)
-    response = complete(_RISK_PROMPT.format(excerpts=excerpts), temperature=0.3)
-    raw_items = _extract_json_array(response)
-    return _to_strategic_items(raw_items, ordered_hits)
+    response = complete(
+        _RISK_PROMPT.format(excerpts=_format_excerpts(ordered_hits)), temperature=0.3
+    )
+    return _to_strategic_items(_extract_json_array(response), ordered_hits)
 
 
 def detect_trends(top_entities: int = 10) -> tuple[list[TrendingEntity], list[StrategicItem]]:
-    """Surface rising entities plus synthesised strategic trends."""
     rising = detect_rising_entities(label="ORG", top_n=top_entities)
     if not rising:
-        logger.info("No rising entities detected")
         return [], []
 
     rising_text = "\n".join(
@@ -230,13 +247,11 @@ def detect_trends(top_entities: int = 10) -> tuple[list[TrendingEntity], list[St
         _TREND_PROMPT.format(rising=rising_text, excerpts=excerpts),
         temperature=0.3,
     )
-    raw_items = _extract_json_array(response)
-    items = _to_strategic_items(raw_items, hits)
+    items = _to_strategic_items(_extract_json_array(response), hits)
     return rising, items
 
 
 def score_items_by_credibility(items: list[StrategicItem]) -> list[StrategicItem]:
-    """Adjust item confidence by the credibility of its supporting sources."""
     for item in items:
         if not item.evidence_sources:
             continue
