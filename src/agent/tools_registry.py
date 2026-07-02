@@ -9,6 +9,7 @@ from typing import Any, Callable
 from src.intelligence import engines
 from src.tools import (
     comparator,
+    financial_data,
     retriever,
     sentiment,
     source_credibility,
@@ -56,6 +57,10 @@ def _summarize_trending(result) -> str:
     return f"{len(result)} trending entities"
 
 
+def _summarize_financial(result) -> str:
+    return result.summary[:120]
+
+
 _REGISTRY: dict[str, ToolSpec] = {
     "retriever": ToolSpec(
         name="retriever",
@@ -63,6 +68,14 @@ _REGISTRY: dict[str, ToolSpec] = {
         required_params={"query": "the search string"},
         optional_params={"k": "max results, integer, default 5"},
         function=lambda **kw: retriever.search(**kw),
+        summary_fn=_summarize_hits,
+    ),
+    "hybrid_search": ToolSpec(
+        name="hybrid_search",
+        description="Combined semantic + keyword search. Better for specific terms, model names, or exact phrases.",
+        required_params={"query": "the search string"},
+        optional_params={"k": "max results, integer, default 5"},
+        function=lambda **kw: retriever.search_hybrid(**kw),
         summary_fn=_summarize_hits,
     ),
     "web_search": ToolSpec(
@@ -73,9 +86,17 @@ _REGISTRY: dict[str, ToolSpec] = {
         function=lambda **kw: web_search.search(**kw),
         summary_fn=_summarize_hits,
     ),
+    "financial_data": ToolSpec(
+        name="financial_data",
+        description="Live stock data: price, P/E, 52-week range, market cap, dividend yield. Default ticker: BMW.DE.",
+        required_params={},
+        optional_params={"ticker": "stock ticker, default BMW.DE"},
+        function=lambda **kw: financial_data.get_snapshot(**kw),
+        summary_fn=_summarize_financial,
+    ),
     "sentiment": ToolSpec(
         name="sentiment",
-        description="Classify a piece of text as positive, neutral, or negative.",
+        description="Classify a piece of text as positive, neutral, or negative using FinBERT.",
         required_params={"text": "text to classify"},
         optional_params={},
         function=lambda text: sentiment.classify(text),
@@ -173,7 +194,8 @@ _KEY_ALIASES = {
     "sourcename": "source",
     "maxresults": "k",
     "numresults": "k",
-    "n": "k",
+    "stockticker": "ticker",
+    "symbol": "ticker",
 }
 
 

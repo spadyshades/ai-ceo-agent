@@ -1,10 +1,13 @@
-"""Semantic and metadata-filtered retrieval over the BMW corpus."""
+"""Semantic, BM25, and hybrid retrieval over the BMW corpus."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
+
+from rank_bm25 import BM25Okapi
 
 from src.processing.embedder import embed_texts
 from src.processing.indexer import get_collection
@@ -12,8 +15,6 @@ from src.processing.indexer import get_collection
 
 @dataclass
 class RetrievalHit:
-    """A single retrieved chunk with similarity score and metadata."""
-
     chunk_id: str
     document_id: str
     text: str
@@ -35,7 +36,6 @@ def _normalize_results(results: dict) -> list[RetrievalHit]:
 
     hits: list[RetrievalHit] = []
     for chunk_id, text, meta, dist in zip(ids, docs, metas, distances):
-        # Cosine distance to similarity: 1 - distance
         similarity = max(0.0, 1.0 - float(dist))
         hits.append(
             RetrievalHit(
@@ -103,15 +103,7 @@ def search_by_entity(
     k: int = 10,
     pre_fetch: int = 30,
 ) -> list[RetrievalHit]:
-    """Search semantically then filter for chunks mentioning a specific entity.
-
-    Args:
-        query: Semantic query.
-        entity_text: Entity string (case-insensitive substring match).
-        entity_label: spaCy label without prefix (org, person, gpe, ...).
-        k: Number of hits to return after filtering.
-        pre_fetch: How many to retrieve before filtering.
-    """
+    """Search semantically then filter for chunks mentioning a specific entity."""
     candidates = search(query, k=pre_fetch)
     needle = entity_text.lower()
     field = f"entities_{entity_label.lower()}"
@@ -120,3 +112,95 @@ def search_by_entity(
         if needle in hit.metadata.get(field, "").lower()
     ]
     return filtered[:k]
+
+
+# --- BM25 keyword search ---
+
+@lru_cache(maxsize=1)
+def _build_bm25_index() -> tuple[BM25Okapi, list[str], list[dict]]:
+    """Build a BM25 index over all chunks in the collection."""
+    collection = get_collection()
+    all_data = collection.get(include=["documents", "metadatas"])
+    ids = all_data.get("ids", [])
+    docs = all_data.get("documents", [])
+    metas = all_data.get("metadatas", [])
+
+    tokenized = [doc.lower().split() for doc in docs]
+    bm25 = BM25Okapi(tokenized)
+    return bm25, ids, metas
+
+
+def search_bm25(query: str, k: int = 5) -> list[RetrievalHit]:
+    """Keyword-based BM25 search over all chunks."""
+    bm25, ids, metas = _build_bm25_index()
+    collection = get_collection()
+
+    tokenized_query = query.lower().split()
+    scores = bm25.get_scores(tokenized_query)
+
+    scored = sorted(
+        zip(range(len(ids)), scores), key=lambda x: x[1], reverse=True
+    )[:k]
+
+    all_docs = collection.get(include=["documents", "metadatas"])
+    docs = all_docs.get("documents", [])
+
+    hits: list[RetrievalHit] = []
+    max_score = scored[0][1] if scored and scored[0][1] > 0 else 1.0
+    for idx, score in scored:
+        if score <= 0:
+            continue
+        meta = metas[idx] if idx < len(metas) else {}
+        text = docs[idx] if idx < len(docs) else ""
+        hits.append(
+            RetrievalHit(
+                chunk_id=ids[idx],
+                document_id=meta.get("document_id", ""),
+                text=text,
+                source=meta.get("source", ""),
+                url=meta.get("url", ""),
+                title=meta.get("title", ""),
+                published_at=meta.get("published_at", ""),
+                similarity=float(score / max_score),
+                metadata=meta,
+            )
+        )
+    return hits
+
+
+def search_hybrid(
+    query: str,
+    k: int = 5,
+    semantic_weight: float = 0.7,
+    bm25_weight: float = 0.3,
+    pre_fetch: int = 20,
+) -> list[RetrievalHit]:
+    """Reciprocal rank fusion of semantic and BM25 search."""
+    semantic_hits = search(query, k=pre_fetch)
+    bm25_hits = search_bm25(query, k=pre_fetch)
+
+    rrf_scores: dict[str, float] = {}
+    hit_map: dict[str, RetrievalHit] = {}
+
+    for rank, hit in enumerate(semantic_hits):
+        rrf_scores[hit.chunk_id] = rrf_scores.get(hit.chunk_id, 0) + (
+            semantic_weight / (rank + 60)
+        )
+        hit_map[hit.chunk_id] = hit
+
+    for rank, hit in enumerate(bm25_hits):
+        rrf_scores[hit.chunk_id] = rrf_scores.get(hit.chunk_id, 0) + (
+            bm25_weight / (rank + 60)
+        )
+        if hit.chunk_id not in hit_map:
+            hit_map[hit.chunk_id] = hit
+
+    ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:k]
+
+    results: list[RetrievalHit] = []
+    max_rrf = ranked[0][1] if ranked else 1.0
+    for chunk_id, rrf_score in ranked:
+        hit = hit_map[chunk_id]
+        hit.similarity = round(rrf_score / max_rrf, 4)
+        results.append(hit)
+    return results
