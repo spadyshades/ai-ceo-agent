@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import json
 import sqlite3
+import time
 
 import pandas as pd
 import plotly.express as px
@@ -76,6 +77,13 @@ st.markdown("""
         border: 1px solid #1a1a3e;
         border-radius: 6px;
         margin-bottom: 0.5rem;
+    }
+    .agent-input-box {
+        background: #16213e;
+        border: 1px solid #0f3460;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -197,6 +205,40 @@ def _impact_span(impact: str) -> str:
     return f'<span class="{cls}">{impact}</span>'
 
 
+# --- agent runner ---
+
+def _run_agent_from_dashboard(goal: str) -> None:
+    """Run the agent and show live progress in the dashboard."""
+    from src.agent.graph import run_agent
+
+    status = st.empty()
+    progress = st.progress(0, text="Starting agent...")
+
+    status.info(f"Running agent with goal: {goal}")
+    progress.progress(10, text="Planning...")
+
+    started = time.time()
+    state = run_agent(goal)
+    elapsed = time.time() - started
+
+    progress.progress(100, text="Complete")
+
+    n_recs = len(state.recommendations) if state.recommendations else 0
+    val_passed = state.validation.passed if state.validation else False
+    val_text = "PASSED" if val_passed else "FAILED"
+
+    status.success(
+        f"Agent run complete in {elapsed:.0f}s -- "
+        f"{n_recs} recommendations, validation {val_text}, "
+        f"{state.replan_count} replan(s)"
+    )
+
+    # Clear caches so the new run appears in the dropdown
+    _load_runs.clear()
+    time.sleep(1)
+    st.rerun()
+
+
 # --- sidebar ---
 
 def _sidebar():
@@ -206,21 +248,43 @@ def _sidebar():
         "Strategic intelligence powered by Phi-4 Mini, LangGraph, and ChromaDB</p>",
         unsafe_allow_html=True,
     )
+
+    # --- Agent Runner ---
     st.sidebar.markdown("---")
+    st.sidebar.markdown("**Run New Analysis**")
+    goal_input = st.sidebar.text_area(
+        "Strategic goal",
+        placeholder="e.g. What should BMW prioritise in China this quarter?",
+        height=80,
+        key="goal_input",
+    )
+    run_clicked = st.sidebar.button(
+        "Run Agent",
+        use_container_width=True,
+        type="primary",
+    )
+    st.sidebar.caption("Typical runtime: 5-15 minutes on CPU")
+
+    if run_clicked and goal_input.strip():
+        st.session_state["run_goal"] = goal_input.strip()
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Previous Runs**")
 
     runs = _load_runs()
     if not runs:
-        st.sidebar.warning("No agent runs found. Run the agent first.")
-        return None
+        st.sidebar.warning("No agent runs found.")
+        return None, False
 
     labels = []
     for r in runs:
         ts = r["started_at"][:16] if r.get("started_at") else "?"
         status = r.get("status", "?")
-        labels.append(f"{ts} | {status}")
+        goal_short = r.get("goal", "")[:40]
+        labels.append(f"{ts} | {status} | {goal_short}")
 
     selected_idx = st.sidebar.selectbox(
-        "Agent Run",
+        "Select run",
         range(len(labels)),
         format_func=lambda i: labels[i],
     )
@@ -228,10 +292,7 @@ def _sidebar():
     run = runs[selected_idx]
     state = _load_state(run)
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**Run Details**")
     st.sidebar.code(f"ID: {run['id'][:12]}...", language=None)
-    st.sidebar.markdown(f"**Goal:** {run['goal'][:120]}")
 
     status_class = "run-status-pass" if run["status"] == "success" else "run-status-fail"
     st.sidebar.markdown(
@@ -252,7 +313,8 @@ def _sidebar():
         unsafe_allow_html=True,
     )
 
-    return run
+    should_run = "run_goal" in st.session_state
+    return run, should_run
 
 
 # --- sections ---
@@ -514,7 +576,6 @@ def _section_recommendations(state: dict):
         st.info("No recommendations in this run.")
         return
 
-    # Summary bar
     priorities = [r.get("priority", "Medium") for r in recs]
     p_counts = {p: priorities.count(p) for p in ["High", "Medium", "Low"] if priorities.count(p)}
     cols = st.columns(len(p_counts) + 1)
@@ -586,7 +647,6 @@ def _section_agent_trace(run: dict, state: dict):
 
     run_id = run["id"]
 
-    # Execution summary metrics
     tool_calls = _load_tool_calls(run_id)
     validations = _load_validations(run_id)
     plans = _load_plans(run_id)
@@ -600,7 +660,6 @@ def _section_agent_trace(run: dict, state: dict):
 
     st.markdown("")
 
-    # Plans
     if plans:
         st.subheader(f"Plans ({len(plans)} version(s))")
         for p in plans:
@@ -617,11 +676,9 @@ def _section_agent_trace(run: dict, state: dict):
                         f"-- {step.get('description', '')}"
                     )
 
-    # Tool calls
     if tool_calls:
         st.subheader(f"Tool Calls ({len(tool_calls)})")
 
-        # Tool usage chart
         tc_df = pd.DataFrame(tool_calls)
         if not tc_df.empty and "tool" in tc_df.columns:
             tool_counts = tc_df["tool"].value_counts().reset_index()
@@ -639,7 +696,6 @@ def _section_agent_trace(run: dict, state: dict):
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        # Table
         tc_table = []
         for tc in tool_calls:
             tc_table.append({
@@ -651,7 +707,6 @@ def _section_agent_trace(run: dict, state: dict):
             })
         st.dataframe(pd.DataFrame(tc_table), use_container_width=True, hide_index=True)
 
-    # Validations
     if validations:
         st.subheader(f"Validation Passes ({len(validations)})")
         for v in validations:
@@ -666,7 +721,6 @@ def _section_agent_trace(run: dict, state: dict):
                 else:
                     st.markdown("All checks passed.")
 
-    # Raw state (collapsible)
     with st.expander("Raw state JSON"):
         summary = {
             "replan_count": state.get("replan_count", 0),
@@ -684,11 +738,21 @@ def _section_agent_trace(run: dict, state: dict):
 # --- main ---
 
 def main():
-    run = _sidebar()
+    run, should_run = _sidebar()
+
+    st.title("BMW CEO Intelligence Dashboard")
+
+    # Handle agent run request
+    if should_run and "run_goal" in st.session_state:
+        goal = st.session_state.pop("run_goal")
+        st.markdown("---")
+        _run_agent_from_dashboard(goal)
+        return
+
     if run is None:
-        st.title("BMW CEO Intelligence Dashboard")
         st.warning(
-            "No agent runs found. Run the agent first:\n\n"
+            "No agent runs found. Type a goal in the sidebar and click **Run Agent**, "
+            "or run from the terminal:\n\n"
             "```\npython -m src.agent.cli\n```"
         )
         return
@@ -696,7 +760,11 @@ def main():
     state = _load_state(run)
     corpus = _load_corpus_stats()
 
-    st.title("BMW CEO Intelligence Dashboard")
+    # Show goal of selected run
+    st.markdown(
+        f'<div class="section-explain">Viewing results for: <strong>{run["goal"]}</strong></div>',
+        unsafe_allow_html=True,
+    )
 
     tabs = st.tabs([
         "Overview",
