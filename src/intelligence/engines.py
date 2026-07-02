@@ -12,7 +12,7 @@ from src.tools.retriever import RetrievalHit, search
 from src.tools.sentiment import classify_batch
 from src.tools.source_credibility import score_source
 from src.tools.trend_detector import TrendingEntity, detect_rising_entities
-from src.utils.llm import complete
+from src.utils.llm import complete_json
 
 
 logger = logging.getLogger(__name__)
@@ -48,32 +48,30 @@ _OPPORTUNITY_PROMPT = (
     "You are a strategic analyst preparing intelligence for the CEO of BMW.\n"
     "Below are excerpts from recent news, press releases, and research.\n"
     "Identify up to 5 distinct STRATEGIC OPPORTUNITIES for BMW supported by these excerpts.\n\n"
-    "For each opportunity, output an object with these fields:\n"
+    "Return a JSON object with a single key \"items\" containing an array.\n"
+    "Each item has these fields:\n"
     '  "title": short headline (max 12 words)\n'
     '  "description": 2-3 sentences explaining the opportunity\n'
     '  "impact": one of "Low", "Medium", "High"\n'
     '  "confidence": a number from 0.0 to 1.0\n'
     '  "evidence_chunk_ids": list of chunk IDs from the excerpts that support it\n\n'
-    "Return a single valid JSON array with double-quoted property names and no trailing commas. "
-    "No surrounding text or commentary.\n\n"
     "Excerpts:\n{excerpts}\n\n"
-    "JSON array:"
+    "JSON:"
 )
 
 _RISK_PROMPT = (
     "You are a strategic analyst preparing intelligence for the CEO of BMW.\n"
     "Below are excerpts from recent news, press releases, and research.\n"
     "Identify up to 5 distinct STRATEGIC RISKS facing BMW supported by these excerpts.\n\n"
-    "For each risk, output an object with these fields:\n"
+    "Return a JSON object with a single key \"items\" containing an array.\n"
+    "Each item has these fields:\n"
     '  "title": short headline (max 12 words)\n'
     '  "description": 2-3 sentences explaining the risk\n'
     '  "impact": one of "Low", "Medium", "High"\n'
     '  "confidence": a number from 0.0 to 1.0\n'
     '  "evidence_chunk_ids": list of chunk IDs from the excerpts that support it\n\n'
-    "Return a single valid JSON array with double-quoted property names and no trailing commas. "
-    "No surrounding text or commentary.\n\n"
     "Excerpts:\n{excerpts}\n\n"
-    "JSON array:"
+    "JSON:"
 )
 
 _TREND_PROMPT = (
@@ -81,17 +79,16 @@ _TREND_PROMPT = (
     "Below is a list of entities with rising mention frequency in recent coverage,\n"
     "and supporting excerpts from the corpus.\n"
     "Identify up to 5 distinct STRATEGIC TRENDS that BMW management should monitor.\n\n"
-    "For each trend, output an object with these fields:\n"
+    "Return a JSON object with a single key \"items\" containing an array.\n"
+    "Each item has these fields:\n"
     '  "title": short headline (max 12 words)\n'
     '  "description": 2-3 sentences explaining the trend and why it matters\n'
     '  "impact": one of "Low", "Medium", "High"\n'
     '  "confidence": a number from 0.0 to 1.0\n'
     '  "evidence_chunk_ids": list of chunk IDs from the excerpts that support it\n\n'
-    "Return a single valid JSON array with double-quoted property names and no trailing commas. "
-    "No surrounding text or commentary.\n\n"
     "Rising entities:\n{rising}\n\n"
     "Excerpts:\n{excerpts}\n\n"
-    "JSON array:"
+    "JSON:"
 )
 
 
@@ -117,50 +114,31 @@ def _format_excerpts(hits: list[RetrievalHit], max_hits: int = 15) -> str:
     return "\n\n".join(blocks)
 
 
-def _clean_json_string(s: str) -> str:
-    """Best-effort cleanup of common LLM JSON mistakes."""
-    # Quote unquoted property names: {key: ...} or , key: ...
-    s = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', s)
-    # Remove trailing commas before closing braces/brackets
-    s = re.sub(r",(\s*[}\]])", r"\1", s)
-    return s
+def _parse_items(text: str) -> list[dict[str, Any]]:
+    """Parse JSON output, expecting {\"items\": [...]} or a bare array."""
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and "items" in data:
+            items = data["items"]
+            if isinstance(items, list):
+                return [d for d in items if isinstance(d, dict)]
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+    except json.JSONDecodeError:
+        pass
 
-
-def _extract_json_array(text: str) -> list[dict[str, Any]]:
-    """Extract a JSON array with multiple fallback strategies."""
-    # 1. Direct parse of array region
+    # Fallback: extract array from text
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if match:
-        raw = match.group(0)
         try:
-            data = json.loads(raw)
-            if isinstance(data, list):
-                return [d for d in data if isinstance(d, dict)]
-        except json.JSONDecodeError:
-            pass
-        try:
-            data = json.loads(_clean_json_string(raw))
+            data = json.loads(match.group(0))
             if isinstance(data, list):
                 return [d for d in data if isinstance(d, dict)]
         except json.JSONDecodeError:
             pass
 
-    # 2. Extract individual JSON objects
-    objects: list[dict[str, Any]] = []
-    for m in re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL):
-        chunk = m.group(0)
-        for candidate in (chunk, _clean_json_string(chunk)):
-            try:
-                obj = json.loads(candidate)
-                if isinstance(obj, dict):
-                    objects.append(obj)
-                    break
-            except json.JSONDecodeError:
-                continue
-
-    if not objects:
-        logger.warning("No JSON parseable in LLM response")
-    return objects
+    logger.warning("No parseable items in LLM response")
+    return []
 
 
 def _to_strategic_items(
@@ -200,10 +178,10 @@ def detect_opportunities() -> list[StrategicItem]:
     hits = _gather_evidence(_OPPORTUNITY_QUERIES)
     if not hits:
         return []
-    response = complete(
+    response = complete_json(
         _OPPORTUNITY_PROMPT.format(excerpts=_format_excerpts(hits)), temperature=0.3
     )
-    return _to_strategic_items(_extract_json_array(response), hits)
+    return _to_strategic_items(_parse_items(response), hits)
 
 
 def detect_risks() -> list[StrategicItem]:
@@ -222,10 +200,10 @@ def detect_risks() -> list[StrategicItem]:
     )
     ordered_hits = [pair[0] for pair in weighted]
 
-    response = complete(
+    response = complete_json(
         _RISK_PROMPT.format(excerpts=_format_excerpts(ordered_hits)), temperature=0.3
     )
-    return _to_strategic_items(_extract_json_array(response), ordered_hits)
+    return _to_strategic_items(_parse_items(response), ordered_hits)
 
 
 def detect_trends(top_entities: int = 10) -> tuple[list[TrendingEntity], list[StrategicItem]]:
@@ -243,11 +221,11 @@ def detect_trends(top_entities: int = 10) -> tuple[list[TrendingEntity], list[St
     hits = _gather_evidence(seed_queries, per_query=2)
     excerpts = _format_excerpts(hits) if hits else "No supporting excerpts retrieved."
 
-    response = complete(
+    response = complete_json(
         _TREND_PROMPT.format(rising=rising_text, excerpts=excerpts),
         temperature=0.3,
     )
-    items = _to_strategic_items(_extract_json_array(response), hits)
+    items = _to_strategic_items(_parse_items(response), hits)
     return rising, items
 
 

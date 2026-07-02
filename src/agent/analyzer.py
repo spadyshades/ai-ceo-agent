@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from src.agent.schema import AgentState, AnalysisOutput
-from src.utils.llm import complete
+from src.utils.llm import complete_json
 
 
 logger = logging.getLogger(__name__)
@@ -37,7 +36,7 @@ Tool call summaries:
 
 Synthesise this evidence into a coherent executive analysis.
 
-Return ONLY a valid JSON object with this exact shape:
+Return a JSON object with this exact shape:
 {{
   "summary": "3-5 sentence executive summary of the strategic situation",
   "key_findings": ["finding 1", "finding 2", "finding 3"],
@@ -45,7 +44,6 @@ Return ONLY a valid JSON object with this exact shape:
 }}
 
 Cite real chunk IDs from the retrieved chunks or evidence above.
-No commentary before or after.
 
 JSON:"""
 
@@ -68,16 +66,6 @@ def _format_retrieved(retrieved_chunks, limit: int = 30) -> str:
     )
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-
-
 def analyze_node(state: AgentState) -> dict[str, Any]:
     logger.info("Analyzer: synthesising evidence")
 
@@ -97,19 +85,14 @@ def analyze_node(state: AgentState) -> dict[str, Any]:
         retrieved_summary=_format_retrieved(state.retrieved_chunks),
         tool_summary=tool_summary,
     )
-    response = complete(prompt, temperature=0.3)
-    parsed = _extract_json_object(response)
+    response = complete_json(prompt, temperature=0.3)
 
     analysis: AnalysisOutput
-    if parsed:
-        try:
-            analysis = AnalysisOutput.model_validate(parsed)
-        except Exception as exc:
-            logger.warning("Analysis validation failed: %s", exc)
-            analysis = AnalysisOutput(summary="Analysis synthesis failed.")
-    else:
-        analysis = AnalysisOutput(
-            summary="Analysis synthesis returned malformed output."
-        )
+    try:
+        parsed = json.loads(response)
+        analysis = AnalysisOutput.model_validate(parsed)
+    except Exception as exc:
+        logger.warning("Analysis validation failed: %s", exc)
+        analysis = AnalysisOutput(summary="Analysis synthesis failed.")
 
     return {"analysis": analysis}

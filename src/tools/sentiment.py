@@ -1,4 +1,4 @@
-"""Document-level sentiment classification using a HuggingFace model."""
+"""Document-level sentiment classification using FinBERT."""
 
 from __future__ import annotations
 
@@ -12,15 +12,7 @@ from transformers import pipeline
 logger = logging.getLogger(__name__)
 
 
-_MODEL_NAME = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-_LABEL_MAP = {
-    "LABEL_0": "negative",
-    "LABEL_1": "neutral",
-    "LABEL_2": "positive",
-    "negative": "negative",
-    "neutral": "neutral",
-    "positive": "positive",
-}
+_MODEL_NAME = "ProsusAI/finbert"
 
 
 @dataclass
@@ -41,17 +33,15 @@ def _get_pipeline():
 
 
 def classify(text: str) -> SentimentResult:
-    """Return a single sentiment label and confidence score for text."""
     if not text or not text.strip():
         return SentimentResult(label="neutral", score=0.0)
     clf = _get_pipeline()
     result = clf(text[:2000])[0]
-    label = _LABEL_MAP.get(result["label"], result["label"].lower())
+    label = result["label"].lower()
     return SentimentResult(label=label, score=float(result["score"]))
 
 
 def classify_batch(texts: list[str]) -> list[SentimentResult]:
-    """Batch sentiment classification."""
     if not texts:
         return []
     clf = _get_pipeline()
@@ -59,7 +49,7 @@ def classify_batch(texts: list[str]) -> list[SentimentResult]:
     raw_results = clf(truncated)
     return [
         SentimentResult(
-            label=_LABEL_MAP.get(r["label"], r["label"].lower()),
+            label=r["label"].lower(),
             score=float(r["score"]),
         )
         for r in raw_results

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -16,7 +17,7 @@ from src.config import (
 from src.processing.embedder import embed_texts
 from src.processing.indexer import get_collection
 from src.tools.comparator import find_contradicting_evidence
-from src.utils.llm import complete
+from src.utils.llm import complete_json
 
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ Contradicting evidence found in the corpus:
 
 Based on the contradicting evidence, is this recommendation still defensible?
 
-Answer with ONLY a JSON object:
+Return a JSON object:
 {{
   "defensible": true or false,
   "concern": "one sentence explaining why, or empty string if defensible"
@@ -161,27 +162,22 @@ def _check_adversarial(state: AgentState) -> list[str]:
                 rationale=rec.rationale,
                 contradictions=contra_text,
             )
-            response = complete(prompt, temperature=0.1)
+            response = complete_json(prompt, temperature=0.1)
 
-            resp_lower = response.lower().replace(" ", "")
-            if '"defensible":false' in resp_lower:
-                import json, re
-                match = re.search(r"\{.*\}", response, re.DOTALL)
-                concern = ""
-                if match:
-                    try:
-                        parsed = json.loads(match.group(0))
-                        concern = parsed.get("concern", "")
-                    except Exception:
-                        pass
-                if concern:
-                    issues.append(
-                        f"rec#{i} '{rec.title[:30]}': adversarial challenge - {concern}"
-                    )
-                else:
-                    issues.append(
-                        f"rec#{i} '{rec.title[:30]}': failed adversarial review"
-                    )
+            try:
+                parsed = json.loads(response)
+                if isinstance(parsed, dict) and parsed.get("defensible") is False:
+                    concern = parsed.get("concern", "")
+                    if concern:
+                        issues.append(
+                            f"rec#{i} '{rec.title[:30]}': adversarial challenge - {concern}"
+                        )
+                    else:
+                        issues.append(
+                            f"rec#{i} '{rec.title[:30]}': failed adversarial review"
+                        )
+            except json.JSONDecodeError:
+                logger.warning("Adversarial response not valid JSON for rec#%d", i)
         except Exception as exc:
             logger.warning("Adversarial check failed for rec#%d: %s", i, exc)
 

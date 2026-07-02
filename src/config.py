@@ -48,7 +48,7 @@ COMPETITORS = [
 
 # LLM (Ollama)
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-LLM_MODEL = os.getenv("LLM_MODEL", "phi4-mini")
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b")
 LLM_TEMPERATURE = 0.3
 LLM_NUM_CTX = 4096
 

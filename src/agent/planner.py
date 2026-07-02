@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from src.agent.schema import AgentState, Plan, PlanStep
 from src.agent.tools_registry import format_catalog, list_tools
-from src.utils.llm import complete
+from src.utils.llm import complete_json
 
 
 logger = logging.getLogger(__name__)
@@ -31,15 +30,13 @@ Guidelines:
 - Use web_search for information outside the BMW corpus.
 - Keep the plan minimal; each LLM-based tool takes about 60 seconds on CPU.
 
-Return ONLY a valid JSON object with this exact shape:
+Return a JSON object with this exact shape:
 {{
   "reasoning": "brief explanation of the plan strategy",
   "steps": [
     {{"id": 1, "tool": "tool_name", "params": {{}}, "description": "what this step accomplishes"}}
   ]
 }}
-
-No commentary before or after the JSON. Do not wrap in markdown.
 
 JSON:"""
 
@@ -53,19 +50,7 @@ evidence, use more sources, or refine the targeting.
 """
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse plan JSON: %s", exc)
-        return None
-
-
 def _fallback_plan(goal: str) -> Plan:
-    """Default plan used when the LLM cannot produce a valid one."""
     return Plan(
         reasoning="fallback default plan: broad strategic scan with targeted retrieval",
         steps=[
@@ -82,7 +67,6 @@ def _fallback_plan(goal: str) -> Plan:
 
 
 def planner_node(state: AgentState) -> dict[str, Any]:
-    """Produce a plan for the current goal."""
     logger.info("Planner: replan_count=%d", state.replan_count)
 
     replan_context = ""
@@ -95,21 +79,19 @@ def planner_node(state: AgentState) -> dict[str, Any]:
         replan_context=replan_context,
         tool_catalog=format_catalog(),
     )
-    response = complete(prompt, temperature=0.2)
+    response = complete_json(prompt, temperature=0.2)
 
-    parsed = _extract_json_object(response)
     plan: Plan | None = None
-    if parsed:
-        try:
-            plan = Plan.model_validate(parsed)
-        except Exception as exc:
-            logger.warning("Plan validation failed: %s", exc)
+    try:
+        parsed = json.loads(response)
+        plan = Plan.model_validate(parsed)
+    except Exception as exc:
+        logger.warning("Plan parse failed: %s", exc)
 
     if plan is None:
         logger.warning("Falling back to default plan")
         plan = _fallback_plan(state.goal)
 
-    # Filter out steps referencing unknown tools
     known_tools = set(list_tools())
     plan.steps = [s for s in plan.steps if s.tool in known_tools]
     if not plan.steps:

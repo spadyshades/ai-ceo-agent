@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from src.agent.schema import AgentState, Recommendation
-from src.utils.llm import complete
+from src.utils.llm import complete_json
 
 
 logger = logging.getLogger(__name__)
@@ -38,7 +37,8 @@ Retrieved evidence chunks (cite these IDs in your recommendations):
 Produce 3 to 5 strategic recommendations for the CEO. Each must be specific,
 actionable, and grounded in the evidence above.
 
-Each recommendation MUST include:
+Return a JSON object with a single key "recommendations" containing an array.
+Each recommendation has:
 - "title" (max 12 words)
 - "rationale" (2-3 sentences)
 - "priority": "High", "Medium", or "Low"
@@ -47,9 +47,7 @@ Each recommendation MUST include:
 - "confidence" (number 0.0 to 1.0)
 - "evidence_chunk_ids": list of at least 3 chunk IDs from the retrieved evidence above
 
-Return ONLY a JSON array of recommendation objects. No commentary.
-
-JSON array:"""
+JSON:"""
 
 
 def _format_items(items, max_items: int = 8) -> str:
@@ -74,28 +72,7 @@ def _format_retrieved(retrieved_chunks, limit: int = 40) -> str:
     )
 
 
-def _extract_json_array(text: str) -> list[dict] | None:
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if not match:
-        return None
-    raw = match.group(0)
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, list) else None
-    except json.JSONDecodeError:
-        pass
-    # Clean common LLM mistakes
-    cleaned = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', raw)
-    cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
-    try:
-        data = json.loads(cleaned)
-        return data if isinstance(data, list) else None
-    except json.JSONDecodeError:
-        return None
-
-
 def _build_source_map(state: AgentState) -> dict[str, str]:
-    """Build chunk_id -> source mapping from all available evidence."""
     sources: dict[str, str] = {}
     for ref in state.retrieved_chunks:
         if ref.source:
@@ -113,15 +90,12 @@ def _enrich_evidence(
     sources_by_chunk: dict[str, str],
     state: AgentState,
 ) -> Recommendation:
-    """Auto-attach sources for cited chunk IDs and supplement with retrieved chunks."""
-    # Resolve sources for chunk IDs the LLM cited
     resolved_sources = sorted({
         sources_by_chunk[cid]
         for cid in rec.evidence_chunk_ids
         if cid in sources_by_chunk and sources_by_chunk[cid]
     })
 
-    # If still lacking distinct sources, supplement from retrieved chunks
     if len(resolved_sources) < 2 and state.retrieved_chunks:
         used_ids = set(rec.evidence_chunk_ids)
         for ref in state.retrieved_chunks:
@@ -134,7 +108,6 @@ def _enrich_evidence(
             if len(resolved_sources) >= 3:
                 break
 
-    # If still lacking evidence count, add more from retrieved chunks
     if len(rec.evidence_chunk_ids) < 3 and state.retrieved_chunks:
         used_ids = set(rec.evidence_chunk_ids)
         for ref in state.retrieved_chunks:
@@ -149,6 +122,20 @@ def _enrich_evidence(
 
     rec.evidence_sources = sorted(set(resolved_sources))
     return rec
+
+
+def _parse_recommendations(text: str) -> list[dict]:
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and "recommendations" in data:
+            recs = data["recommendations"]
+            if isinstance(recs, list):
+                return [r for r in recs if isinstance(r, dict)]
+        if isinstance(data, list):
+            return [r for r in data if isinstance(r, dict)]
+    except json.JSONDecodeError:
+        pass
+    return []
 
 
 def decide_node(state: AgentState) -> dict[str, Any]:
@@ -177,8 +164,8 @@ def decide_node(state: AgentState) -> dict[str, Any]:
         trend_summary=_format_items(state.trends),
         retrieved_summary=_format_retrieved(state.retrieved_chunks),
     )
-    response = complete(prompt, temperature=0.3)
-    raw_items = _extract_json_array(response) or []
+    response = complete_json(prompt, temperature=0.3)
+    raw_items = _parse_recommendations(response)
 
     recommendations: list[Recommendation] = []
     for raw in raw_items:
