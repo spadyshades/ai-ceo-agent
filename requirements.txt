@@ -34,3 +34,4 @@ schedule>=1.2.0
 tqdm>=4.66.0
 plotly
 rank-bm25
+fpdf2

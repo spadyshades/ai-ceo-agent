@@ -9,10 +9,12 @@ from typing import Any, Callable
 from src.intelligence import engines
 from src.tools import (
     comparator,
+    competitor_comparison,
     financial_data,
     retriever,
     sentiment,
     source_credibility,
+    topic_trends,
     trend_detector,
     web_search,
 )
@@ -61,6 +63,15 @@ def _summarize_financial(result) -> str:
     return result.summary[:120]
 
 
+def _summarize_competitors(result) -> str:
+    names = [p.name for p in result[:5]]
+    return f"{len(result)} competitors compared: {', '.join(names)}"
+
+
+def _summarize_topic_trends(result) -> str:
+    return f"{len(result)} rising topics"
+
+
 _REGISTRY: dict[str, ToolSpec] = {
     "retriever": ToolSpec(
         name="retriever",
@@ -93,6 +104,26 @@ _REGISTRY: dict[str, ToolSpec] = {
         optional_params={"ticker": "stock ticker, default BMW.DE"},
         function=lambda **kw: financial_data.get_snapshot(**kw),
         summary_fn=_summarize_financial,
+    ),
+    "compare_competitors": ToolSpec(
+        name="compare_competitors",
+        description="Compare BMW against competitors by mention frequency and sentiment in the corpus.",
+        required_params={},
+        optional_params={},
+        function=lambda **kw: competitor_comparison.compare(),
+        summary_fn=_summarize_competitors,
+    ),
+    "detect_topic_trends": ToolSpec(
+        name="detect_topic_trends",
+        description="TF-IDF based detection of rising topics (not just entities) in recent coverage.",
+        required_params={},
+        optional_params={
+            "days_recent": "integer, default 14",
+            "days_baseline": "integer, default 28",
+            "top_n": "integer, default 20",
+        },
+        function=lambda **kw: topic_trends.detect_rising_topics(**kw),
+        summary_fn=_summarize_topic_trends,
     ),
     "sentiment": ToolSpec(
         name="sentiment",
