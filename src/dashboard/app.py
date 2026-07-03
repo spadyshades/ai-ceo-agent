@@ -440,6 +440,66 @@ def _section_topic_trends():
                  use_container_width=True, hide_index=True)
 
 
+def _section_search():
+    st.header("Corpus Search")
+    st.markdown('<div class="section-explain">Search the BMW knowledge base using three retrieval modes. Semantic finds conceptually similar content. BM25 matches exact keywords. Hybrid combines both using reciprocal rank fusion.</div>', unsafe_allow_html=True)
+
+    query = st.text_input("Search query", placeholder="e.g. BMW iX3 Neue Klasse battery technology", key="search_query")
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        mode = st.radio("Search mode", ["Hybrid", "Semantic", "BM25"], key="search_mode")
+    with col2:
+        k = st.slider("Results", min_value=3, max_value=20, value=5, key="search_k")
+
+    if query:
+        from src.tools.retriever import search, search_bm25, search_hybrid
+
+        with st.spinner("Searching..."):
+            if mode == "Semantic":
+                hits = search(query, k=k)
+            elif mode == "BM25":
+                hits = search_bm25(query, k=k)
+            else:
+                hits = search_hybrid(query, k=k)
+
+        if not hits:
+            st.info("No results found.")
+            return
+
+        st.markdown(f"**{len(hits)} results** ({mode} search)")
+        for i, hit in enumerate(hits, 1):
+            with st.expander(f"#{i} | {hit.source} | sim={hit.similarity:.3f} | {hit.title[:80]}", expanded=(i <= 2)):
+                st.markdown(f"**Source:** {hit.source} | **Published:** {hit.published_at[:10] if hit.published_at else 'N/A'}")
+                st.markdown(f"**Chunk ID:** `{hit.chunk_id}`")
+                st.text(hit.text[:600])
+                if hit.url:
+                    st.caption(f"URL: {hit.url[:120]}")
+
+        # Comparison mode
+        if st.checkbox("Compare all three modes side by side", key="compare_modes"):
+            st.markdown("---")
+            st.subheader("Mode Comparison")
+            c1, c2, c3 = st.columns(3)
+
+            with st.spinner("Running all three searches..."):
+                sem_hits = search(query, k=5)
+                bm25_hits = search_bm25(query, k=5)
+                hyb_hits = search_hybrid(query, k=5)
+
+            with c1:
+                st.markdown("**Semantic**")
+                for h in sem_hits:
+                    st.markdown(f"- `{h.similarity:.3f}` {h.title[:50]}")
+            with c2:
+                st.markdown("**BM25**")
+                for h in bm25_hits:
+                    st.markdown(f"- `{h.similarity:.3f}` {h.title[:50]}")
+            with c3:
+                st.markdown("**Hybrid**")
+                for h in hyb_hits:
+                    st.markdown(f"- `{h.similarity:.3f}` {h.title[:50]}")
+
+
 def _section_recommendations(state):
     st.header("Strategic Recommendations")
     st.markdown('<div class="section-explain">Ranked recommendations validated against the corpus with adversarial challenge and evidence verification.</div>', unsafe_allow_html=True)
@@ -571,7 +631,7 @@ def main():
 
     tabs = st.tabs([
         "Overview", "Market Intelligence", "Competitors", "Topic Trends",
-        "Opportunities", "Risks", "Sentiment",
+        "Opportunities", "Risks", "Sentiment", "Search",
         "Recommendations", "CEO Briefing", "Agent Trace",
     ])
 
@@ -582,9 +642,10 @@ def main():
     with tabs[4]: _section_opportunities(state)
     with tabs[5]: _section_risks(state)
     with tabs[6]: _section_sentiment()
-    with tabs[7]: _section_recommendations(state)
-    with tabs[8]: _section_briefing(state)
-    with tabs[9]: _section_agent_trace(run, state)
+    with tabs[7]: _section_search()
+    with tabs[8]: _section_recommendations(state)
+    with tabs[9]: _section_briefing(state)
+    with tabs[10]: _section_agent_trace(run, state)
 
 
 if __name__ == "__main__":
