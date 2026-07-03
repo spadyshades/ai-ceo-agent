@@ -19,6 +19,7 @@ from src.processing.embedder import embed_texts
 from src.processing.extractor import extract_entities
 from src.processing.indexer import collection_stats, upsert_chunks
 from src.utils.logging import setup_logger
+from src.processing.sentiment_indexer import run as run_sentiment
 
 
 logger = setup_logger(__name__)
@@ -165,6 +166,8 @@ def main() -> None:
     summary = process_all(force_reprocess=args.reprocess)
     corpus = get_corpus_stats()
     index = collection_stats()
+    sentiment_count = run_sentiment()
+    logger.info("Pre-computed sentiment for %d documents", sentiment_count)
 
     print("\nProcessing summary")
     print("-" * 60)

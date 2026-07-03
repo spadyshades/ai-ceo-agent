@@ -8,6 +8,7 @@ from typing import Any
 
 from src.agent.schema import AgentState, Plan, PlanStep
 from src.agent.tools_registry import format_catalog, list_tools
+from src.agent.run_memory import get_previous_run_summary
 from src.utils.llm import complete_json
 
 
@@ -18,6 +19,7 @@ _PLAN_PROMPT = """You are the planning component of a strategic intelligence age
 
 User goal: {goal}
 
+{previous_context}
 {replan_context}
 Available tools:
 {tool_catalog}
@@ -28,6 +30,11 @@ Guidelines:
 - For broad strategic goals, include detect_opportunities, detect_risks, and detect_trends.
 - For specific questions, prefer targeted retriever queries (much faster than engines).
 - Use web_search for information outside the BMW corpus.
+- Use hybrid_search when the query contains specific model names or technical terms.
+- Use financial_data to include live stock market context.
+- Use compare_competitors when the goal involves competitive positioning.
+- Use detect_topic_trends to find rising themes beyond named entities.
+- If previous analysis exists, build on it rather than repeating the same queries.
 - Keep the plan minimal; each LLM-based tool takes about 60 seconds on CPU.
 
 Return a JSON object with this exact shape:
@@ -46,6 +53,13 @@ _REPLAN_PREFIX = """The previous plan failed validation with these issues:
 
 Please produce a revised plan that addresses them. Gather more diverse
 evidence, use more sources, or refine the targeting.
+
+"""
+
+_PREVIOUS_CONTEXT_PREFIX = """Context from the most recent previous analysis:
+{summary}
+
+Build on this prior analysis where relevant. Avoid repeating identical queries.
 
 """
 
@@ -74,8 +88,15 @@ def planner_node(state: AgentState) -> dict[str, Any]:
         issues = "\n".join(f"- {iss}" for iss in state.validation.issues)
         replan_context = _REPLAN_PREFIX.format(issues=issues)
 
+    previous_context = ""
+    if state.replan_count == 0:
+        prev_summary = get_previous_run_summary(exclude_run_id=state.run_id)
+        if prev_summary:
+            previous_context = _PREVIOUS_CONTEXT_PREFIX.format(summary=prev_summary)
+
     prompt = _PLAN_PROMPT.format(
         goal=state.goal,
+        previous_context=previous_context,
         replan_context=replan_context,
         tool_catalog=format_catalog(),
     )

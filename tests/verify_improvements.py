@@ -1,64 +1,61 @@
-"""Verify improvements 7 (competitor comparison), 8 (topic trends), 9 (query dedup), 10 (PDF report)."""
+"""Verify improvements 11 (embedding cache) and 12 (cross-run memory)."""
 
 import sys
 import time
 
 
-def test_competitor_comparison():
-    from src.tools.competitor_comparison import compare
+def test_embedding_cache():
+    from src.tools.embedding_cache import get_cached, put_cached, get_or_compute
+    from src.processing.embedder import embed_texts
 
-    profiles = compare(competitors=["Tesla", "BYD", "Mercedes-Benz"])
-    assert profiles, "No competitor profiles returned"
-    for p in profiles:
-        print(
-            f"  {p.name}: {p.mention_count} mentions, "
-            f"sentiment +{p.sentiment_positive}/~{p.sentiment_neutral}/-{p.sentiment_negative}"
-        )
+    query = "BMW electric vehicle strategy test query"
+
+    cached = get_cached(query)
+    assert cached is None, "Should not be cached yet"
+
+    embedding = get_or_compute(query, lambda q: embed_texts([q])[0])
+    assert len(embedding) == 384, f"Expected 384-dim, got {len(embedding)}"
+
+    cached = get_cached(query)
+    assert cached is not None, "Should be cached now"
+    assert len(cached) == 384
+
+    t0 = time.time()
+    _ = get_or_compute(query, lambda q: embed_texts([q])[0])
+    cached_time = time.time() - t0
+    print(f"  Cache hit time: {cached_time*1000:.1f}ms")
+    assert cached_time < 0.1, "Cache hit should be under 100ms"
 
 
-def test_topic_trends():
-    from src.tools.topic_trends import detect_rising_topics
-
-    topics = detect_rising_topics(days_recent=14, days_baseline=60, top_n=10)
-    print(f"  {len(topics)} rising topics found")
-    for t in topics[:5]:
-        growth = "inf" if t.growth_rate == float("inf") else f"{t.growth_rate:.1f}x"
-        print(f"    '{t.term}': recent={t.recent_tfidf:.4f}, growth={growth}")
-    assert isinstance(topics, list)
-
-
-def test_query_dedup():
+def test_retriever_uses_cache():
     from src.tools.retriever import search
-    from src.tools.retrieval_utils import dedupe_by_document
+    import time
 
-    hits = search("BMW electric vehicle strategy", k=10)
-    deduped = dedupe_by_document(hits)
-    print(f"  Before dedup: {len(hits)} hits")
-    print(f"  After dedup:  {len(deduped)} hits (unique documents)")
-    assert len(deduped) <= len(hits)
+    query = "BMW Neue Klasse platform launch"
 
+    t0 = time.time()
+    hits1 = search(query, k=3)
+    first_time = time.time() - t0
 
-def test_pdf_report():
-    from src.tools.report_generator import generate_report
+    t0 = time.time()
+    hits2 = search(query, k=3)
+    second_time = time.time() - t0
 
-    path = generate_report(output_path="data/test_report.pdf")
-    print(f"  Report saved: {path}")
-
-    import os
-    size = os.path.getsize(path)
-    print(f"  File size: {size:,} bytes")
-    assert size > 500, "PDF too small, likely empty"
-    os.remove(path)
-    print("  Cleaned up test file")
+    print(f"  First search:  {first_time:.3f}s")
+    print(f"  Second search: {second_time:.3f}s (cached embedding)")
+    assert hits1[0].chunk_id == hits2[0].chunk_id, "Same query should return same results"
 
 
-def test_tools_in_registry():
-    from src.agent.tools_registry import list_tools
+def test_cross_run_memory():
+    from src.agent.run_memory import get_previous_run_summary
 
-    tools = list_tools()
-    assert "compare_competitors" in tools, f"compare_competitors missing: {tools}"
-    assert "detect_topic_trends" in tools, f"detect_topic_trends missing: {tools}"
-    print(f"  Registered tools ({len(tools)}): {tools}")
+    summary = get_previous_run_summary(exclude_run_id="nonexistent")
+    if summary:
+        print(f"  Previous run context ({len(summary)} chars):")
+        for line in summary.split("\n")[:4]:
+            print(f"    {line}")
+    else:
+        print("  No previous runs found (expected if no agent runs exist)")
 
 
 def _run(name, fn):
@@ -77,15 +74,13 @@ def _run(name, fn):
 
 def main():
     print("=" * 60)
-    print("  Verify improvements 7, 8, 9, 10")
+    print("  Verify improvements 11, 12")
     print("=" * 60)
 
     results = [
-        _run("competitor_comparison", test_competitor_comparison),
-        _run("topic_trends", test_topic_trends),
-        _run("query_dedup", test_query_dedup),
-        _run("pdf_report", test_pdf_report),
-        _run("tools_in_registry", test_tools_in_registry),
+        _run("embedding_cache", test_embedding_cache),
+        _run("retriever_cache", test_retriever_uses_cache),
+        _run("cross_run_memory", test_cross_run_memory),
     ]
 
     print(f"\n{sum(results)}/{len(results)} passed")

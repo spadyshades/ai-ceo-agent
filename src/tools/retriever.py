@@ -11,6 +11,7 @@ from rank_bm25 import BM25Okapi
 
 from src.processing.embedder import embed_texts
 from src.processing.indexer import get_collection
+from src.tools.embedding_cache import get_or_compute
 
 
 @dataclass
@@ -73,6 +74,11 @@ def _build_where(
     return {"$and": conditions}
 
 
+def _embed_query(query: str) -> list[float]:
+    """Embed a query using the cache."""
+    return get_or_compute(query, lambda q: embed_texts([q])[0])
+
+
 def search(
     query: str,
     k: int = 5,
@@ -82,7 +88,7 @@ def search(
 ) -> list[RetrievalHit]:
     """Semantic search with optional metadata filters."""
     collection = get_collection()
-    query_embedding = embed_texts([query])[0]
+    query_embedding = _embed_query(query)
 
     query_kwargs: dict[str, Any] = {
         "query_embeddings": [query_embedding],
@@ -118,7 +124,6 @@ def search_by_entity(
 
 @lru_cache(maxsize=1)
 def _build_bm25_index() -> tuple[BM25Okapi, list[str], list[dict]]:
-    """Build a BM25 index over all chunks in the collection."""
     collection = get_collection()
     all_data = collection.get(include=["documents", "metadatas"])
     ids = all_data.get("ids", [])
